@@ -1,10 +1,14 @@
+{-# LANGUAGE ImportQualifiedPost #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE NamedFieldPuns #-}
 -- | Pager!
 
 module Main where
 
+import Control.Comonad ((<<=))
+import Control.Exception qualified as Exception
 import Data.ByteString qualified as BS
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
@@ -13,6 +17,8 @@ import Data.Time.Clock.POSIX qualified as PosixClock
 import Data.Time.Format qualified as TimeFormat
 import System.Directory qualified as Directory
 import System.Info qualified as SystemInfo
+import System.IO (FilePath, BufferMode(..), hGetChar, hSetEcho, stdin, stdout)
+import System.IO.Error qualified as IOError
 import System.Process (readProcess)
 import GHC.IO.Handle (hSetBuffering)
 
@@ -23,7 +29,7 @@ data FileInfo = FileInfo
   , fileSize :: Int
   , fileMTime :: Clock.UTCTime
   , fileReadable :: Bool
-  , fileWriteable :: Bool
+  , fileWritable :: Bool
   , fileExecutable :: Bool
   } deriving Show
 
@@ -43,12 +49,12 @@ fileInfo filePath = do
   mtime <- Directory.getModificationTime filePath
   contents <- BS.readFile filePath
   let size = BS.length contents
-  return FileInfo
+  pure FileInfo
     { filePath
     , fileSize
     , fileMTime
     , fileReadable = Directory.readable perms
-    , fileWriteable = Directory.writeable perms
+    , fileWritable = Directory.writable perms
     , fileExecutable = Directory.executable perms
     }
 
@@ -80,7 +86,7 @@ formatFileInfo FileInfo{..} maxWidth totalPages currentPage =
       TimeFormat.formatTime TimeFormat.defaultTimeLocale "%F %T" fileMTime
     permissionString =
       [ if fileReadable then 'r' else '-'
-      , if fileWriteable then 'w' else '-'
+      , if fileWritable then 'w' else '-'
       , if fileExecutable then 'x' else '-' ]
     statusLine = Text.pack $
       printf
@@ -127,7 +133,7 @@ getTerminalSize =
     _other -> pure $ ScreenDimensions 25 80
   where
     -- TODO: Add error handling
-    tputScreenDimensions :: IO Dimensions
+    tputScreenDimensions :: IO ScreenDimensions
     tputScreenDimensions =
       readProcess "tput" ["lines"] ""
       >>= \lines ->
@@ -161,6 +167,16 @@ showPages (page:pages) =
   >>= \case
     Continue -> showPages pages
     Cancel   -> return ()
+
+handleArgs :: IO (Either String FilePath)
+handleArgs =
+  parseArgs <$> Env.getArgs
+  where
+    parseArgs argumentList =
+      case argumentList of
+        [fname] -> Right fname
+        []      -> Left "no filename provided"
+        _       -> Left "multiple files not supported"
 
 runHCat :: IO ()
 runHCat = do
