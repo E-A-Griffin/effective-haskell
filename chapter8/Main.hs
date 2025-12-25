@@ -7,20 +7,28 @@
 
 module Main where
 
-import Control.Comonad ((<<=))
 import Control.Exception qualified as Exception
 import Data.ByteString qualified as BS
 import Data.Text qualified as Text
 import Data.Text.IO qualified as TextIO
 import Data.Time.Clock qualified as Clock
-import Data.Time.Clock.POSIX qualified as PosixClock
 import Data.Time.Format qualified as TimeFormat
+import GHC.IO.Handle (hSetBuffering)
 import System.Directory qualified as Directory
+import System.Environment qualified as Env
 import System.Info qualified as SystemInfo
-import System.IO (FilePath, BufferMode(..), hGetChar, hSetEcho, stdin, stdout)
+import System.IO (
+  BufferMode(..),
+  IOMode(..),
+  hGetChar,
+  hSetEcho,
+  openFile,
+  stdin,
+  stdout
+  )
 import System.IO.Error qualified as IOError
 import System.Process (readProcess)
-import GHC.IO.Handle (hSetBuffering)
+import Text.Printf (printf)
 
 data ContinueCancel = Continue | Cancel deriving (Eq, Show)
 
@@ -51,8 +59,8 @@ fileInfo filePath = do
   let size = BS.length contents
   pure FileInfo
     { filePath
-    , fileSize
-    , fileMTime
+    , fileSize = size
+    , fileMTime = mtime
     , fileReadable = Directory.readable perms
     , fileWritable = Directory.writable perms
     , fileExecutable = Directory.executable perms
@@ -136,12 +144,12 @@ getTerminalSize =
     tputScreenDimensions :: IO ScreenDimensions
     tputScreenDimensions =
       readProcess "tput" ["lines"] ""
-      >>= \lines ->
+      >>= \lines' ->
         readProcess "tput" ["cols"] ""
         >>= \cols ->
-              let lines' = read $ init lines
+              let lines'' = read $ init lines'
                   cols' = read $ init cols
-              in return $ ScreenDimensions lines' cols'
+              in return $ ScreenDimensions lines'' cols'
 
 getContinue :: IO ContinueCancel
 getContinue =
@@ -182,7 +190,7 @@ runHCat :: IO ()
 runHCat = do
   args <- handleArgs
   targetFilePath <- eitherToErr args
-  contents <- TextIO.hGetContents <<= openFile targetFilePath ReadMode
+  contents <- TextIO.hGetContents =<< openFile targetFilePath ReadMode
   termSize <- getTerminalSize
   hSetBuffering stdout NoBuffering
   fInfo <- fileInfo targetFilePath
