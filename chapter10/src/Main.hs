@@ -8,6 +8,7 @@ module Main where
 
 import Control.Exception (IOException, handle)
 import Control.Monad (unless)
+import Control.Monad.Extra (concatForM)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.Foldable (for_)
@@ -96,6 +97,77 @@ traverseDirectory metrics rootPath action = do
 
   traverseSubdirectory (dropSuffix "/" rootPath)
 
+
+traverseDirectory' :: MetricsStore -> FilePath -> (FilePath -> IO ()) -> IO ()
+traverseDirectory' metrics rootPath action = do
+  seenRef <- newIORef Set.empty
+  let
+    haveSeenDirectory canonicalPath =
+      Set.member canonicalPath <$> readIORef seenRef
+
+    addDirectoryToSeen canonicalPath =
+      modifyIORef' seenRef $ Set.insert canonicalPath
+
+    handler ex = print ex >> storeTickFailure metrics
+
+    traverseSubdirectory subdirPath =
+      storeTimeFunction metrics "traverseSubdirectory" $ do
+        contents <- listDirectory subdirPath
+        for_ contents $ \file' ->
+          handle @IOException handler $ do
+          let file = subdirPath <> "/" <> file'
+          canonicalPath <- canonicalizePath file
+          classification <- classifyFile canonicalPath
+          result <- case classification of
+            FileTypeOther -> pure ()
+            FileTypeRegularFile ->
+              action file
+            FileTypeDirectory -> do
+              alreadyProcessed <- haveSeenDirectory file
+              unless alreadyProcessed $ do
+                addDirectoryToSeen file
+                traverseSubdirectory file
+          storeTickSuccess metrics
+          pure result
+
+  traverseSubdirectory (dropSuffix "/" rootPath)
+
+traverseDirectoryIO :: forall a. FilePath -> (FilePath -> IO a) -> IO [a]
+traverseDirectoryIO rootPath action = do
+  seenRef <- newIORef Set.empty
+  let
+    haveSeenDirectory canonicalPath =
+      Set.member canonicalPath <$> readIORef seenRef
+
+    addDirectoryToSeen canonicalPath =
+      modifyIORef' seenRef $ Set.insert canonicalPath
+
+    handler ex = print ex >> pure []
+
+    traverseSubdirectory :: FilePath -> IO [a]
+    traverseSubdirectory subdirPath = do
+        contents <- listDirectory subdirPath
+        concatForM contents $ \file' ->
+          handle @IOException handler $ do
+          let file = subdirPath <> "/" <> file'
+          canonicalPath <- canonicalizePath file
+          classification <- classifyFile canonicalPath
+          result <- case classification of
+            FileTypeOther -> pure []
+            FileTypeRegularFile ->
+              sequence [action file]
+            FileTypeDirectory -> do
+              alreadyProcessed <- haveSeenDirectory file
+              if alreadyProcessed then do
+                addDirectoryToSeen file
+                traverseSubdirectory file
+              else
+                pure []
+          pure result
+
+  traverseSubdirectory (dropSuffix "/" rootPath)
+
+
 longestContents :: Metrics -> FilePath -> IO ByteString
 longestContents metrics rootPath = do
   contentsRef <- newIORef BS.empty
@@ -149,5 +221,38 @@ directorySummaryWithMetrics root = do
 
   displayMetrics metrics
 
+directorySummaryWithMetrics' :: FilePath -> IO ()
+directorySummaryWithMetrics' root = do
+  metrics <- newMetricsStore
+  histogramRef <- newIORef Map.empty
+
+  traverseDirectory' metrics root $ \file -> do
+    putStrLn $ file <> ":"
+    contents <- storeTimeFunction metrics "TextIO.readFile" $
+      TextIO.readFile file
+
+    storeTimeFunction metrics "wordcount" $
+      let wordCount = length $ Text.words contents
+      in putStrLn $ "    word count: " <> show wordCount
+
+    storeTimeFunction metrics "histogram" $ do
+      oldHistogram <- readIORef histogramRef
+      let
+        addCharToHistogram histogram letter =
+          Map.insertWith (+) letter 1 histogram
+        !newHistogram = Text.foldl' addCharToHistogram oldHistogram contents
+      modifyIORef' histogramRef (const newHistogram)
+
+  histogram <- readIORef histogramRef
+  putStrLn "Histogram Data:"
+  for_ (Map.toList histogram) $ \(letter :: Char, count :: Int) ->
+    printf "    %c: %d\n" letter count
+
+  displayMetricsStore metrics
+
+-- Conclusion both approaches have similar performance but whichever runs second
+-- does better likely due to caching
 main :: IO ()
-main = getArgs >>= directorySummaryWithMetrics . head
+main = getArgs
+  >>= (\args@(arg:_) -> directorySummaryWithMetrics' arg >> pure args)
+  >>= directorySummaryWithMetrics . head
